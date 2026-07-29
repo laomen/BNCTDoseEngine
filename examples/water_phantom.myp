@@ -1,0 +1,244 @@
+# ===========================================================================
+# BNCT Dose Calculation — Water Phantom Neutron Flux
+# Written in MYP (Monte-Carlo Yield Physics) Language
+#
+# This sample program demonstrates how to compute thermal neutron flux
+# and absorbed dose rates inside a water phantom irradiated by an
+# epithermal/thermal neutron beam, as used in Boron Neutron Capture
+# Therapy (BNCT).
+#
+# Physical model
+# --------------
+#   1. Number densities are derived from water composition and density.
+#   2. Macroscopic cross-sections are calculated from microscopic ones.
+#   3. Uncollided beam flux follows exponential attenuation:
+#          Φ(z) = Φ₀ · exp(−Σ_t · z)
+#   4. Absorbed dose rates are computed for each BNCT dose component:
+#          D' = Φ · Σ_r · Q / ρ
+#
+# References
+# ----------
+#   Barth et al., "Current status of boron neutron capture therapy of
+#   high grade gliomas and recurrent head and neck cancer", Radiation
+#   Oncology (2012) 7:146.
+#
+#   Attix, "Introduction to Radiological Physics and Radiation Dosimetry",
+#   Wiley-VCH, 2004.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# 1. Physical constants (pre-loaded by the interpreter, listed for clarity)
+# ---------------------------------------------------------------------------
+# AVOGADRO = 6.02214076e23   # mol⁻¹
+# MEV_TO_JOULE = 1.60218e-13 # J / MeV
+
+# ---------------------------------------------------------------------------
+# 2. Water phantom geometry
+# ---------------------------------------------------------------------------
+CONST PHANTOM_WIDTH  = 20.0   # cm (x-direction)
+CONST PHANTOM_HEIGHT = 20.0   # cm (y-direction)
+CONST PHANTOM_DEPTH  = 30.0   # cm (z-direction, beam axis)
+
+# ---------------------------------------------------------------------------
+# 3. Water material properties
+# ---------------------------------------------------------------------------
+CONST WATER_DENSITY = 1.0     # g / cm³
+CONST MOLAR_MASS_H2O = 18.015 # g / mol
+
+# Number densities (atoms / cm³) computed via built-in helper
+#   number_density(rho, A, n_per_mol)  →  rho * NA * n_per_mol / A
+VAR N_H = number_density(WATER_DENSITY, MOLAR_MASS_H2O, 2.0)  # 2 H per H₂O
+VAR N_O = number_density(WATER_DENSITY, MOLAR_MASS_H2O, 1.0)  # 1 O per H₂O
+
+# ---------------------------------------------------------------------------
+# 4. Neutron cross-sections for water at thermal energy (0.025 eV)
+#    Sources: ENDF/B-VIII.0
+# ---------------------------------------------------------------------------
+# Microscopic cross-sections (barn)
+CONST SIGMA_A_H    = 0.3326    # ¹H  absorption
+CONST SIGMA_A_O    = 0.00019   # ¹⁶O absorption
+CONST SIGMA_S_H    = 38.0      # ¹H  elastic scattering
+CONST SIGMA_S_O    = 3.76      # ¹⁶O elastic scattering
+
+# Macroscopic cross-sections (cm⁻¹) via built-in helper
+#   macro_xsec(N, sigma_barn) = N * sigma_barn * 1e-24
+VAR Sigma_a_H = macro_xsec(N_H, SIGMA_A_H)
+VAR Sigma_a_O = macro_xsec(N_O, SIGMA_A_O)
+VAR Sigma_s_H = macro_xsec(N_H, SIGMA_S_H)
+VAR Sigma_s_O = macro_xsec(N_O, SIGMA_S_O)
+
+VAR Sigma_a = Sigma_a_H + Sigma_a_O   # total absorption (cm⁻¹)
+VAR Sigma_s = Sigma_s_H + Sigma_s_O   # total scattering (cm⁻¹)
+VAR Sigma_t = Sigma_a + Sigma_s        # total cross-section (cm⁻¹)
+
+# Transport cross-section (1-g) correction; for water g ≈ 0.0 at thermal
+VAR Sigma_tr = Sigma_t
+
+# Diffusion coefficient D = 1 / (3 Σ_tr)  [cm]
+VAR D = diffusion_coeff(Sigma_tr)
+
+# Diffusion length L = sqrt(D / Σ_a)  [cm]
+VAR L = sqrt(D / Sigma_a)
+
+# ---------------------------------------------------------------------------
+# 5. Neutron source (epithermal beam at phantom surface z = 0)
+# ---------------------------------------------------------------------------
+CONST PHI_0 = 1.0e9   # incident thermal-equivalent flux  (n / cm² / s)
+
+# ---------------------------------------------------------------------------
+# 6. BNCT boron compound parameters
+# ---------------------------------------------------------------------------
+# BPA (L-boronophenylalanine) typical tumour concentration: 30 ppm (μg/g)
+CONST BORON_CONC_PPM = 30.0           # ppm  (μg B-10 per g tissue)
+CONST SIGMA_A_B10   = 3837.0          # barn — ¹⁰B thermal capture
+CONST Q_B10_MEV     = 2.31            # MeV  — energy per ¹⁰B(n,α)⁷Li event
+
+# Number density of ¹⁰B atoms in tissue (A = 10 g/mol, 1 atom per formula)
+#   C_B10 [g/cm³] = BORON_CONC_PPM × 1e-6 × WATER_DENSITY
+VAR rho_B10 = BORON_CONC_PPM * 1.0e-6 * WATER_DENSITY
+VAR N_B10   = number_density(rho_B10, 10.0, 1.0)
+VAR Sigma_a_B10 = macro_xsec(N_B10, SIGMA_A_B10)
+
+# ---------------------------------------------------------------------------
+# 7. Dose weighting factors (compound biological effectiveness, CBE)
+#    Standard values for BPA-BNCT in brain tissue
+# ---------------------------------------------------------------------------
+CONST CBE_BORON    = 3.8    # dimensionless
+CONST CBE_HYDROGEN = 3.2    # ¹H(n,γ)²H reaction
+CONST CBE_NITROGEN = 1.7    # ¹⁴N(n,p)¹⁴C reaction
+
+# H-capture cross-section and Q value
+CONST SIGMA_A_H_GAMMA = 0.3326   # barn  (same as absorption)
+CONST Q_H_MEV         = 2.224    # MeV   — deuterium binding energy
+
+# N-14 concentration in tissue (~3.5 wt.%)
+CONST N14_MASS_FRAC  = 0.035
+CONST SIGMA_A_N14    = 1.83      # barn  — thermal capture
+CONST Q_N14_MEV      = 0.626     # MeV   — recoil proton energy deposited
+VAR rho_N14   = N14_MASS_FRAC * WATER_DENSITY
+VAR N_N14     = number_density(rho_N14, 14.0, 1.0)
+VAR Sigma_a_N14 = macro_xsec(N_N14, SIGMA_A_N14)
+
+# ---------------------------------------------------------------------------
+# 8. Print summary of material and cross-section data
+# ---------------------------------------------------------------------------
+PRINT "================================================================"
+PRINT "  BNCT Dose Calculation — Water Phantom Neutron Flux"
+PRINT "  MYP (Monte-Carlo Yield Physics) Language — Sample Program"
+PRINT "================================================================"
+PRINT ""
+PRINT "Phantom geometry:"
+PRINT "  Width  :", PHANTOM_WIDTH,  "cm"
+PRINT "  Height :", PHANTOM_HEIGHT, "cm"
+PRINT "  Depth  :", PHANTOM_DEPTH,  "cm"
+PRINT ""
+PRINT "Water nuclear data (thermal, 0.025 eV):"
+PRINT "  H number density     :", N_H,      "atoms/cm3"
+PRINT "  O number density     :", N_O,      "atoms/cm3"
+PRINT "  Sigma_a (absorption) :", Sigma_a,  "cm-1"
+PRINT "  Sigma_s (scattering) :", Sigma_s,  "cm-1"
+PRINT "  Sigma_t (total)      :", Sigma_t,  "cm-1"
+PRINT "  Diffusion coeff D    :", D,        "cm"
+PRINT "  Diffusion length L   :", L,        "cm"
+PRINT ""
+PRINT "Source:"
+PRINT "  Incident flux Phi_0  :", PHI_0, "n/cm2/s"
+PRINT ""
+PRINT "Boron compound (BPA in tumour):"
+PRINT "  Concentration        :", BORON_CONC_PPM, "ppm"
+PRINT "  B-10 number density  :", N_B10,          "atoms/cm3"
+PRINT "  Sigma_a(B-10)        :", Sigma_a_B10,     "cm-1"
+PRINT ""
+
+# ---------------------------------------------------------------------------
+# 9. Neutron flux profile — tabulated along the beam axis (z)
+# ---------------------------------------------------------------------------
+PRINT "----------------------------------------------------------------"
+PRINT "  Neutron Flux Profile along Beam Axis"
+PRINT "----------------------------------------------------------------"
+PRINT "  z (cm)   |  Phi(z) (n/cm2/s)   |  Phi/Phi_0"
+PRINT "  ---------+---------------------+-----------"
+
+VAR dz = PHANTOM_DEPTH / 10.0
+
+FOR i FROM 0 TO 10
+    VAR z = i * dz
+    VAR phi_z = attenuated_flux(PHI_0, Sigma_t, z)
+    VAR phi_ratio = phi_z / PHI_0
+    PRINT "  ", z, "       |", phi_z, "|", phi_ratio
+END FOR
+
+PRINT ""
+
+# ---------------------------------------------------------------------------
+# 10. Dose rate components at selected depths
+# ---------------------------------------------------------------------------
+PRINT "----------------------------------------------------------------"
+PRINT "  Absorbed Dose Rate Components (Gy/s) at Selected Depths"
+PRINT "----------------------------------------------------------------"
+PRINT "  z (cm) | D_boron   | D_hydrogen | D_nitrogen | D_total (weighted)"
+PRINT "  -------+-----------+------------+------------+-------------------"
+
+FOR j FROM 0 TO 10
+    VAR z_j  = j * dz
+    VAR phi_j = attenuated_flux(PHI_0, Sigma_t, z_j)
+
+    # Boron dose component  [Gy/s]
+    VAR D_B  = dose_rate_gy_s(phi_j, Sigma_a_B10, Q_B10_MEV, WATER_DENSITY)
+
+    # Hydrogen (gamma) dose component  [Gy/s]
+    VAR D_H  = dose_rate_gy_s(phi_j, Sigma_a_H,   Q_H_MEV,   WATER_DENSITY)
+
+    # Nitrogen recoil dose component  [Gy/s]
+    VAR D_N  = dose_rate_gy_s(phi_j, Sigma_a_N14,  Q_N14_MEV, WATER_DENSITY)
+
+    # Biologically weighted total dose (RBE-weighted)
+    VAR D_total = CBE_BORON * D_B + CBE_HYDROGEN * D_H + CBE_NITROGEN * D_N
+
+    PRINT "  ", z_j, " | ", D_B, " | ", D_H, " | ", D_N, " | ", D_total
+END FOR
+
+PRINT ""
+
+# ---------------------------------------------------------------------------
+# 11. Peak dose depth and maximum dose
+# ---------------------------------------------------------------------------
+FUNCTION find_peak_depth(step, n_steps)
+    VAR best_z    = 0.0
+    VAR best_dose = 0.0
+    FOR k FROM 0 TO n_steps
+        VAR z_k   = k * step
+        VAR phi_k  = attenuated_flux(PHI_0, Sigma_t, z_k)
+        VAR d_b_k  = dose_rate_gy_s(phi_k, Sigma_a_B10, Q_B10_MEV, WATER_DENSITY)
+        VAR d_h_k  = dose_rate_gy_s(phi_k, Sigma_a_H,   Q_H_MEV,   WATER_DENSITY)
+        VAR d_n_k  = dose_rate_gy_s(phi_k, Sigma_a_N14,  Q_N14_MEV, WATER_DENSITY)
+        VAR dtot_k = CBE_BORON * d_b_k + CBE_HYDROGEN * d_h_k + CBE_NITROGEN * d_n_k
+        IF dtot_k > best_dose THEN
+            best_dose = dtot_k
+            best_z    = z_k
+        END IF
+    END FOR
+    RETURN best_z
+END FUNCTION
+
+VAR fine_step   = PHANTOM_DEPTH / 1000.0
+VAR peak_z      = find_peak_depth(fine_step, 1000)
+VAR peak_phi    = attenuated_flux(PHI_0, Sigma_t, peak_z)
+VAR peak_D_B    = dose_rate_gy_s(peak_phi, Sigma_a_B10, Q_B10_MEV, WATER_DENSITY)
+VAR peak_D_H    = dose_rate_gy_s(peak_phi, Sigma_a_H,   Q_H_MEV,   WATER_DENSITY)
+VAR peak_D_N    = dose_rate_gy_s(peak_phi, Sigma_a_N14,  Q_N14_MEV, WATER_DENSITY)
+VAR peak_D_tot  = CBE_BORON * peak_D_B + CBE_HYDROGEN * peak_D_H + CBE_NITROGEN * peak_D_N
+
+PRINT "================================================================"
+PRINT "  Summary"
+PRINT "================================================================"
+PRINT "  Peak (weighted) dose rate :", peak_D_tot, "Gy/s"
+PRINT "  At depth                  :", peak_z,     "cm"
+PRINT "  Neutron flux at peak      :", peak_phi,   "n/cm2/s"
+PRINT ""
+PRINT "  Typical therapeutic dose  : 12-15 Gy (single fraction)"
+PRINT "  Estimated irradiation time:", 12.0 / peak_D_tot, "s  (for 12 Gy)"
+PRINT ""
+PRINT "================================================================"
+PRINT "  Calculation complete."
+PRINT "================================================================"

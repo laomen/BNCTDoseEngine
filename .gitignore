@@ -1,0 +1,11 @@
+# Python byte-code
+__pycache__/
+*.py[cod]
+*.pyo
+
+# pytest cache
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
