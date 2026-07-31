@@ -1,0 +1,12 @@
+# Build artifacts
+build/
+*.o
+*.out
+sim
+
+# Editor
+.vscode/
+.idea/
+
+# MYP intermediate
+*.myp.o
